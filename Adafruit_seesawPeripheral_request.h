@@ -22,7 +22,7 @@ void requestEvent(void) {
 #endif
   if (base_cmd == SEESAW_STATUS_BASE) {
     if (module_cmd == SEESAW_STATUS_HW_ID)
-      Wire.write((uint8_t)SEESAW_HW_ID);
+      seesawWire.write((uint8_t)SEESAW_HW_ID);
     else if (module_cmd == SEESAW_STATUS_VERSION)
       Adafruit_seesawPeripheral_write32(CONFIG_VERSION);
     else if (module_cmd == SEESAW_STATUS_OPTIONS) {
@@ -40,7 +40,7 @@ void requestEvent(void) {
 #endif
       Adafruit_seesawPeripheral_write32(options);
     } else
-      Wire.write((uint8_t)0);
+      seesawWire.write((uint8_t)0);
   } else if (base_cmd == SEESAW_GPIO_BASE) {
     if (module_cmd == SEESAW_GPIO_BULK) {
 #if defined(ARDUINO_ARCH_STM32)
@@ -75,13 +75,13 @@ void requestEvent(void) {
     if (module_cmd >= SEESAW_ADC_CHANNEL_OFFSET)
       Adafruit_seesawPeripheral_write16(g_bufferedADCRead);
     else if (module_cmd == SEESAW_ADC_STATUS)
-      Wire.write(g_adcStatus);
+      seesawWire.write(g_adcStatus);
   }
 #endif
 
 #if CONFIG_PWM || CONFIG_PWM_16BIT
   else if (base_cmd == SEESAW_TIMER_BASE) {
-    Wire.write(g_pwmStatus);
+    seesawWire.write(g_pwmStatus);
   }
 #endif
 
@@ -91,16 +91,16 @@ void requestEvent(void) {
     uint8_t value = 0xFF;
     if (eepromSafe)
       value = *((const uint8_t *)eepromAddress + module_cmd);
-    Wire.write(value);
+    seesawWire.write(value);
 #else
-    Wire.write(EEPROM.read(module_cmd % EEPROM.length()));
+    seesawWire.write(EEPROM.read(module_cmd % EEPROM.length()));
 #endif
   }
 #endif
 
 #if CONFIG_NEOPIXEL
   else if (base_cmd == SEESAW_NEOPIXEL_BASE) {
-    Wire.write(g_neopixel_status);
+    seesawWire.write(g_neopixel_status);
   }
 #endif
 
@@ -110,9 +110,11 @@ void requestEvent(void) {
     uint8_t command = module_cmd & 0xF0;
     if (encoder_num < CONFIG_NUM_ENCODERS && (command == SEESAW_ENCODER_POSITION ||
                                         command == SEESAW_ENCODER_DELTA)) {
-      int32_t value = g_enc_value[encoder_num];
+      int32_t value;
       if (command == SEESAW_ENCODER_DELTA)
         value = g_enc_delta[encoder_num];
+      else
+        value = g_enc_value[encoder_num];
       Adafruit_seesawPeripheral_write32(value);
       g_enc_delta[encoder_num] = 0;
 #if defined(ARDUINO_ARCH_STM32)
@@ -129,17 +131,17 @@ void requestEvent(void) {
     // this will only be possible if using an ATtiny part with 1K RAM
     // or better; won't fit on smaller devices.
     if (module_cmd == SEESAW_SPECTRUM_RESULTS_LOWER) {
-      Wire.write(fht_log_out, 32);
+      seesawWire.write(fht_log_out, 32);
     } else if (module_cmd == SEESAW_SPECTRUM_RESULTS_UPPER) {
-      Wire.write(&fht_log_out[32], 32);
+      seesawWire.write(&fht_log_out[32], 32);
     } else if (module_cmd == SEESAW_SPECTRUM_CHANNEL) {
       // TO DO: this should re-map the current MUXPOS setting to the same
       // channel mapping as is used in Adafruit_seesawPeripheral_receive.h --
       // see notes over there. Prob just two values. For now though, for the
       // sake of initial testing, this just returns the raw MUXPOS setting.
-      Wire.write(ADC0.MUXPOS); // Return current ADC channel
+      seesawWire.write(ADC0.MUXPOS); // Return current ADC channel
     } else if (module_cmd == SEESAW_SPECTRUM_RATE) {
-      Wire.write(ADC0.SAMPCTRL); // Return current sample rate index
+      seesawWire.write(ADC0.SAMPCTRL); // Return current sample rate index
     }
   }
 #endif
@@ -150,16 +152,16 @@ void requestEvent(void) {
 #if defined(ARDUINO_ARCH_STM32)
       g_uart_status = CONFIG_UART_SERCOM.available() ? 2 : 0;
 #endif
-      Wire.write(g_uart_status);
+      seesawWire.write(g_uart_status);
     } else if (module_cmd == SEESAW_SERCOM_INTEN)
-      Wire.write(g_uart_inten);
+      seesawWire.write(g_uart_inten);
     else if (module_cmd == SEESAW_SERCOM_BAUD)
       Adafruit_seesawPeripheral_write32(g_uart_baud);
     else if (module_cmd == SEESAW_SERCOM_DATA)
-      Wire.write((uint8_t)CONFIG_UART_SERCOM.read());
+      seesawWire.write((uint8_t)CONFIG_UART_SERCOM.read());
   }
 #endif
 
   else
-    Wire.write((uint8_t)0);
+    seesawWire.write((uint8_t)0);
 }

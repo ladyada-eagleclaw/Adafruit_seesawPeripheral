@@ -327,14 +327,16 @@ def spi_test(metro, jl, queue_only=False):
             transfer(b"", 5)
             check(abs(jl.sense(5)) < 0.2, "CS did not start asserted")
             metro.command("C", [4])
-            check(metro.command("Q", [16]) == "OK", "SPI burst transport failed")
+            check(metro.command("Q", [16, 1]) == "OK",
+                  "SPI burst or full-queue repeated-start response failed")
             status(3)
             check(jl.sense(5) > 2.8, "Queue overflow did not release CS")
             abort(True)
             metro.command("C", [1])
             configure()
             transfer(b"", 7)
-            passed("spi_queue_overflow_and_recovery", fault_injection="10 ms main-loop hold")
+            passed("spi_queue_overflow_and_recovery", fault_injection="10 ms main-loop hold",
+                   rejected_header_first_byte=0)
         finally:
             metro.write(0x13, 4, [1])
             metro.command("C", [1])
@@ -945,6 +947,8 @@ def main():
     parser.add_argument("--gpio-build", action="store_true", help="Use the UART/encoder/IRQ-disabled build to test every GPIO")
     parser.add_argument("--encoders", type=int, choices=[1, 2, 3, 4], default=1,
                         help="Match the flashed encoder count; uses Metro D4..D11")
+    parser.add_argument("--clock", type=int, choices=[100000, 200000, 400000],
+                        default=100000, help="I2C clock for the selected electrical tests")
     parser.add_argument("--address", type=lambda value: int(value, 0), default=0x49,
                         help="Initial DUT I2C address (for example 0x58 for inverted straps)")
     parser.add_argument("--straps-inverted", action="store_true",
@@ -969,6 +973,8 @@ def main():
         check(options & 0x6303 == 0x6303, "Full GPIO/ADC/PWM/EEPROM/NeoPixel firmware is not loaded")
         pins = list(ROWS) if args.gpio_build else list(range(2, 11))
         metro.reset()
+        check(metro.command("C", [args.clock // 100000]) == "OK", "I2C clock setup failed")
+        passed("i2c_test_clock", hertz=args.clock)
         phases = [args.phase]
         if args.phase == "all":
             phases = ["gpio", "adc", "pwm", "eeprom", "address"]

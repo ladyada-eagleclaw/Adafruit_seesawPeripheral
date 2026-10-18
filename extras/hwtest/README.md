@@ -28,6 +28,52 @@ These are engineering tests, not production fixture firmware.
 - `i2c_bootloader.py`: C011-specific factory-ROM updater through the existing
   serial I2C host. Full-image programming and restart passed; see below.
 
+## Fast C011 I2C transport
+
+The dedicated I2C1 handler bypasses Wire/HAL callback setup, selects the first
+byte's source when the command header arrives, and reads that source live at
+the read address. The remaining response and read-to-clear effects still use
+the shared request handler. A full command queue must be resolved before the
+first byte; the queue-fault test includes that immediate repeated-START case.
+The address/byte interrupt body runs from `.RamFunc`; callbacks remain in flash.
+
+The final safe SPI build passed 100 ID/version/options cycles at each of
+100/200/400 kHz and 1000 further cycles with immediate repeated START at
+400 kHz (3900 register reads total). Its overrun, bus-error, and first-byte
+mismatch counters all remained zero. At 10 MS/s, the captured address-ACK
+low periods were:
+
+| Bus clock | Ordinary clock low | Write-address ACK low | Read-address ACK low |
+|---|---:|---:|---:|
+| 100 kHz | 5.2-5.3 us | 5.2-5.3 us | 5.2-5.3 us |
+| 200 kHz | 2.7-2.8 us | 2.7-2.8 us | 2.8 us |
+| 400 kHz | 1.5 us | 1.8-1.9 us | 2.4-2.5 us |
+
+Repeated START at 400 kHz had 2.6-2.7 us read-address ACK lows. These are
+measured normal STATUS paths, not worst-case guarantees for every operation.
+The original Wire/HAL read-address ACK lows at 400 kHz were 16.8-42.3 us on
+this same physical Nano fixture. Final 400 kHz electrical checks passed GPIO,
+ADC, PWM, EEPROM software-reset retention/restoration, address changes, GPIO
+IRQ, encoder, and the SPI mode/order/chunk matrix. The queue-fault build also
+passed rejection of an immediate repeated-START header while its queue was full.
+
+Default `CONFIG_I2C_NO_STRETCH=0` retains the hardware safety fallback. A forced
+no-stretch build passed normal reads at 100/200/400 kHz during development, but
+that does not establish safe concurrent EEPROM writes or NeoPixel output.
+Those operations can block interrupt service, so forced no-stretch is a bench
+option only. NeoPixel ring testing remains paused.
+
+`capture_i2c.py` accepts `--clock 100000`, `200000`, or `400000`; the Nano
+`--read-mode` choices are `delayed` (STOP plus 2 ms), `immediate` (STOP without
+the delay), and `restart` (immediate repeated START). Nano inter-byte pauses
+are controller-generated and must not be counted as target stretching.
+`bench.py --clock` selects the same speeds for the electrical checks.
+
+The all-feature UART image now exceeds the C011's reserved 30 KiB application
+region. It is not in the C011 engineering CI matrix; the standalone public
+UART example still compiles. The `uart` build target remains available for
+development, but must not be flashed across the reserved EEPROM page.
+
 ## Nano fixture and ROM update (2026-10-18)
 
 Use `--fixture nano --physical-i2c` with `bench.py`, `circuitpython_host.py`, or
@@ -114,9 +160,10 @@ See ST [AN2606](https://www.st.com/resource/en/application_note/cd00167594-stm32
 [AN4221](https://www.st.com/resource/en/application_note/an4221-i2c-protocol-used-in-the-stm32-bootloader-stmicroelectronics.pdf),
 and [RM0490](https://www.st.com/resource/en/reference_manual/dm00781702.pdf).
 
-The boot-command revision compiled all 18 AVR examples, the minimal C011
-example, all eight C011 engineering configurations, and both Nano/Metro hosts. Current
-sizes include the retained boot-request words and static RAM alignment:
+Before the fast I2C transport, the boot-command revision compiled all 18 AVR
+examples, the minimal C011 example, all eight C011 engineering configurations,
+and both Nano/Metro hosts. These historical sizes include the retained
+boot-request words and static RAM alignment:
 
 | Configuration | Flash image bytes | Static RAM extent | Flash remaining before EEPROM |
 |---|---:|---:|---:|
@@ -124,7 +171,7 @@ sizes include the retained boot-request words and static RAM alignment:
 | SPI | 24612 | 1984 | 6108 |
 | UART | 30656 | 2376 | 64 |
 
-Current host checks passed: Arduino GPIO/ADC on nine pins and PWM on eight,
+Pre-fast-transport host checks passed: Arduino GPIO/ADC on nine pins and PWM on eight,
 Arduino SPI's complete mode/order/chunk matrix and recovery, and the real
 CircuitPython driver on CPython through the physical Nano I2C bus. Native
 CircuitPython runtime remains untested. The independent raw SPI run also

@@ -109,7 +109,7 @@ void handleCommand() {
     unsigned int reg, length, clock;
     if (sscanf(command + 1, "%u %u %u", &reg, &length, &clock) != 3 ||
         reg < 1 || reg > 3 || length < 1 || length > 4 ||
-        (clock != 100000 && clock != 400000)) {
+        (clock != 100000 && clock != 200000 && clock != 400000)) {
       Serial.print("ERR test arguments\n\r");
       return;
     }

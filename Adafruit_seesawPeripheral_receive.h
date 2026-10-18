@@ -70,8 +70,7 @@ void Adafruit_seesawPeripheral_processCommand(const uint8_t *packet,
       Adafruit_seesawPeripheral_gpioDirection(temp, false);
       break;
     case SEESAW_GPIO_BULK:
-      Adafruit_seesawPeripheral_gpioWrite(VALID_GPIO & ~temp, false);
-      Adafruit_seesawPeripheral_gpioWrite(temp, true);
+      Adafruit_seesawPeripheral_gpioBulk(temp);
       break;
     case SEESAW_GPIO_BULK_SET:
       Adafruit_seesawPeripheral_gpioWrite(temp, true);
@@ -302,12 +301,12 @@ void receiveEvent(int howMany) {
   SeesawSTM32::receive(howMany);
 #else
   if (howMany < 2 || (uint32_t)howMany > sizeof(i2c_buffer)) {
-    while (Wire.available())
-      Wire.read();
+    while (seesawWire.available())
+      seesawWire.read();
     return;
   }
   for (uint8_t i = 0; i < howMany; i++)
-    i2c_buffer[i] = Wire.read();
+    i2c_buffer[i] = seesawWire.read();
   // This callback owns the packet throughout decoding; it cannot be replaced
   // by a second receive callback while interrupts are disabled.
   Adafruit_seesawPeripheral_processCommand((const uint8_t *)i2c_buffer,

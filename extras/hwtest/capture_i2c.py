@@ -129,7 +129,9 @@ def main():
     parser.add_argument("--helper", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cycles", type=int, default=500)
-    parser.add_argument("--clock", type=int, choices=(100000, 400000), default=100000)
+    parser.add_argument("--clock", type=int, choices=(100000, 200000, 400000), default=100000)
+    parser.add_argument("--read-mode", choices=("delayed", "immediate", "restart"),
+                        default="delayed", help="Nano register-select/read sequencing")
     parser.add_argument("--rate", type=int, default=5000000)
     controller = parser.add_mutually_exclusive_group()
     controller.add_argument("--direct", action="store_true",
@@ -137,6 +139,8 @@ def main():
     controller.add_argument("--physical-nano", action="store_true",
                             help="Use physical Nano A4/A5 jumpers; do not route I2C")
     args = parser.parse_args()
+    if args.direct and args.read_mode != "delayed":
+        parser.error("--read-mode applies only to the Nano controller")
     capture = Capture(args.capture_port)
     nano = None
     fixture = None
@@ -152,7 +156,7 @@ def main():
         else:
             nano = Metro(args.nano_port)
             fixture.connect_metro_link(args.physical_nano)
-            # Existing host C command selects 1 or 4 multiples of 100 kHz.
+            # Host C command selects 1, 2, or 4 multiples of 100 kHz.
             report(nano.command("C", [args.clock // 100000]))
         expected_reads = ((1, b"\x90"), (2, b"\x00\x00\x95\x1a"),
                           (3, b"\x00\x0a\x63\x03"))
@@ -161,7 +165,8 @@ def main():
                 capture.arm(args.rate)
                 details = {"cycle": cycle, "register": register,
                            "bus_clock": args.clock, "expected": expected.hex(),
-                           "direct": args.direct, "physical_nano": args.physical_nano}
+                           "direct": args.direct, "physical_nano": args.physical_nano,
+                           "read_mode": args.read_mode}
                 try:
                     if args.direct:
                         reply = capture.command(f"T {register} {len(expected)} {args.clock}")
@@ -169,7 +174,11 @@ def main():
                             raise RuntimeError(reply)
                         actual = bytes.fromhex(reply[5:])
                     else:
-                        actual = nano.read(0, register, len(expected))
+                        mode = ("delayed", "immediate", "restart").index(args.read_mode)
+                        answer = nano.command("R", [nano.address, 0, register, len(expected), mode])
+                        if not answer.startswith("DATA "):
+                            raise RuntimeError(answer)
+                        actual = bytes.fromhex(answer[5:])
                     details["actual"] = actual.hex()
                     if actual != expected:
                         raise RuntimeError(f"Wrong bytes: {actual.hex()}")

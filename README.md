@@ -19,6 +19,12 @@ Start with `examples/example_stm32c011`.
 Hardware ID `0x90` is provisional and needs the companion Arduino or
 CircuitPython host-library changes. This is not yet a drop-in ATtiny replacement.
 
+The C011 uses a dedicated I2C1 interrupt transport for 100-400 kHz operation.
+It keeps hardware clock stretching available as a safety fallback, especially
+during flash-backed EEPROM writes and interrupt-masked NeoPixel output.
+`CONFIG_I2C_NO_STRETCH=1` is an experimental bench override, not a safe general
+default: delayed interrupt service can corrupt transfers in that mode.
+
 ### STM32 factory-ROM bootloader
 
 The C011 backend enables `CONFIG_BOOTLOADER` by default. Write the three bytes

@@ -1,10 +1,11 @@
 // Adafruit STM32C011 seesaw bench host, Arduino Uno / Metro Mini.
 // ASCII commands (hexadecimal bytes):
 // W address module register [data...] -> OK or ERR
-// R address module register count -> DATA xx xx ... or ERR
+// R address module register count [mode] -> DATA xx xx ... or ERR
+// mode 0: STOP + 2 ms delay; 1: STOP, no delay; 2: repeated START, no delay.
 // P encoder-mask phase -> hold quadrature phase (bits A/B), 3 releases both.
 // E encoder-mask direction detents step-ms -> generate quadrature, then
-// release. C clock -> 1 selects 100 kHz, 4 selects 400 kHz I2C. B address ->
+// release. C clock -> 1/2/4 selects 100/200/400 kHz I2C. B address ->
 // BEGIN ACCEPTED/REJECTED using the installed seesaw host library. H subcommand
 // [arguments] -> host-library calls; see executeCommand(). S mode order ->
 // start INPUT-ONLY hardware SPI observer (D10 CS, D11 MOSI, D13 SCK). T -> CAP
@@ -203,7 +204,8 @@ void executeCommand() {
     Serial.println(F("OK"));
     return;
   }
-  if (operation == 'Q' && count == 1 && bytes[0] <= 32) {
+  if (operation == 'Q' && (count == 1 || (count == 2 && bytes[1] == 1)) &&
+      bytes[0] <= 32) {
     uint8_t packet[32] = {0x13, 0x02,
                           0x04}; // SPI TRANSFER, discard RX, CS already held.
     for (uint8_t i = 3; i < sizeof(packet); i++)
@@ -221,10 +223,24 @@ void executeCommand() {
         return;
       }
     }
+    if (count == 2) {
+      // With the DUT's 10 ms queue hold, the burst leaves its queue full.
+      // A rejected HWID header must return zero even with a repeated START;
+      // an early first byte must not leak the otherwise-valid HWID (0x90).
+      Wire.beginTransmission(0x49);
+      Wire.write((uint8_t)0);
+      Wire.write((uint8_t)1);
+      if (Wire.endTransmission(false) != 0 ||
+          Wire.requestFrom((uint8_t)0x49, (uint8_t)1) != 1 || Wire.read() != 0) {
+        Serial.print(F("ERR full-queue repeated-start response\n\r"));
+        return;
+      }
+    }
     Serial.println(F("OK"));
     return;
   }
-  if (operation == 'C' && count == 1 && (bytes[0] == 1 || bytes[0] == 4)) {
+  if (operation == 'C' && count == 1 &&
+      (bytes[0] == 1 || bytes[0] == 2 || bytes[0] == 4)) {
     Wire.setClock((uint32_t)bytes[0] * 100000);
     Serial.println(F("OK"));
     return;
@@ -305,13 +321,17 @@ void executeCommand() {
   if (count < 3 || bytes[0] < 8 || bytes[0] > 0x77 ||
       (operation != 'R' && operation != 'W') ||
       (operation == 'W' && count > 33) ||
-      (operation == 'R' && (count != 4 || bytes[3] == 0 || bytes[3] > 32))) {
+      (operation == 'R' && ((count != 4 && count != 5) || bytes[3] == 0 ||
+                           bytes[3] > 32 || (count == 5 && bytes[4] > 2)))) {
     Serial.println(F("ERR command"));
     return;
   }
   Wire.beginTransmission(bytes[0]);
   Wire.write(bytes + 1, operation == 'R' ? 2 : count - 1);
-  uint8_t error = Wire.endTransmission();
+  uint8_t readMode = 0;
+  if (operation == 'R' && count == 5)
+    readMode = bytes[4];
+  uint8_t error = Wire.endTransmission(readMode != 2);
   if (error) {
     Serial.print(F("ERR I2C "));
     Serial.println(error);
@@ -326,7 +346,8 @@ void executeCommand() {
     Serial.println(F("OK"));
     return;
   }
-  delayMicroseconds(2000);
+  if (readMode == 0)
+    delayMicroseconds(2000);
   if (Wire.requestFrom(bytes[0], bytes[3]) != bytes[3]) {
     Serial.println(F("ERR short read"));
     return;

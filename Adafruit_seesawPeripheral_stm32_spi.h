@@ -63,18 +63,32 @@ void spiFail(uint8_t error) {
   spiError = error;
 }
 
-/*! Write an immediate SPI register response from the Wire request callback.
- * @param reg Selected SPI register.
- */
+/*! Read the current SPI bridge flags without consuming receive data. */
+uint8_t spiStatusFlags() {
+  return (spiPending ? 1 : 0) | (spiConfigured ? 2 : 0) |
+         (spiSelected ? 4 : 0) | (spiRxLength ? 8 : 0) | (spiError ? 0x80 : 0);
+}
+/*! Derive the SPI clock from the live hardware divider. */
+uint32_t spiActualClock() {
+  if (!spiConfigured)
+    return 0;
+  uint32_t divisor = ((SPI1->CR1 & SPI_CR1_BR) >> SPI_CR1_BR_Pos) + 1;
+  // begin() accepts only this C011's 48 MHz PCLK. Avoid walking the RCC clock
+  // tree inside the first-byte deadline; the live SPI divider is read above.
+  return 48000000UL >> divisor;
+}
+/*! First wire byte of the actual-clock response. */
+uint8_t spiFirstClockByte() { return spiActualClock() >> 24; }
+/*! Peek at the first receive byte; spiRequest() consumes the full response. */
+uint8_t spiFirstReceiveByte() { return spiRxLength ? spiRx[0] : 0; }
+
+/*! Write an immediate SPI register response. @param reg SPI register. */
 void spiRequest(uint8_t reg) {
   if (reg == spiStatusRegister) {
-    uint8_t flags = (spiPending ? 1 : 0) | (spiConfigured ? 2 : 0) |
-                    (spiSelected ? 4 : 0) | (spiRxLength ? 8 : 0) |
-                    (spiError ? 0x80 : 0);
-    uint8_t status[] = {flags, spiError, spiRxLength, spiSequence};
-    Wire.write(status, sizeof(status));
+    uint8_t status[] = {spiStatusFlags(), spiError, spiRxLength, spiSequence};
+    seesawWire.write(status, sizeof(status));
   } else if (reg == spiReadRegister) {
-    Wire.write(spiRx, spiRxLength);
+    seesawWire.write(spiRx, spiRxLength);
     spiRxLength = 0;
   } else if (reg == spiConfigRegister) {
     uint8_t config[] = {spiMode,
@@ -83,15 +97,9 @@ void spiRequest(uint8_t reg) {
                         (uint8_t)(spiFrequency >> 16),
                         (uint8_t)(spiFrequency >> 8),
                         (uint8_t)spiFrequency};
-    Wire.write(config, sizeof(config));
+    seesawWire.write(config, sizeof(config));
   } else if (reg == spiClockRegister) {
-    uint32_t clock = 0;
-    if (spiConfigured) {
-      uint32_t divisor =
-          (spiPort.getHandle()->Init.BaudRatePrescaler >> SPI_CR1_BR_Pos) + 1;
-      clock = HAL_RCC_GetPCLK1Freq() >> divisor;
-    }
-    Adafruit_seesawPeripheral_write32(clock);
+    Adafruit_seesawPeripheral_write32(spiActualClock());
   }
 }
 

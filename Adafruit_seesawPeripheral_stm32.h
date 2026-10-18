@@ -201,10 +201,31 @@ uint32_t validGPIO() {
   return pins;
 }
 
+#ifdef CONFIG_INTERRUPT_PIN
+GPIO_TypeDef *irqPort;           ///< Cached open-drain interrupt port.
+uint32_t irqPinMask;             ///< Cached interrupt pin bit.
+volatile bool irqActive = false; ///< Last atomically published IRQ state.
+#endif
+
 void updateIRQ() {
 #ifdef CONFIG_INTERRUPT_PIN
-  // A real open-drain output; the local pull-up is in the 3.3 V domain.
+  // Most loop iterations do not change the interrupt line. Do not mask I2C
+  // just to rewrite an unchanged output.
   bool active = g_irqFlags != 0;
+#if CONFIG_UART
+  active |= g_uart_inten && CONFIG_UART_SERCOM.available();
+#endif
+#if CONFIG_ENCODER
+  for (uint8_t i = 0; i < CONFIG_NUM_ENCODERS; i++)
+    active |= (encoderInterrupts & (1 << i)) && g_enc_delta[i] != 0;
+#endif
+  if (active == irqActive)
+    return;
+  uint32_t savedMask = __get_PRIMASK();
+  __disable_irq();
+  // A real open-drain output; the local pull-up is in the 3.3 V domain.
+  // Recheck after masking: a read-to-clear callback may have run above.
+  active = g_irqFlags != 0;
 #if CONFIG_UART
   active |= g_uart_inten && CONFIG_UART_SERCOM.available();
 #endif
@@ -213,18 +234,22 @@ void updateIRQ() {
     active |= (encoderInterrupts & (1 << i)) && g_enc_delta[i] != 0;
   }
 #endif
-  digitalWrite(CONFIG_INTERRUPT_PIN, active ? LOW : HIGH);
+  // BSRR changes one output atomically without Arduino pin lookup overhead.
+  irqPort->BSRR = active ? irqPinMask << 16 : irqPinMask;
+  irqActive = active;
+  __set_PRIMASK(savedMask);
 #endif
 }
 
-uint32_t readGPIO() {
-  uint32_t value = 0;
-  for (uint8_t pin = 0; pin < 16; pin++) {
-    if ((validGPIO() & (1UL << pin)) && digitalRead(pin)) {
-      value |= 1UL << pin;
-    }
-  }
-  return value;
+inline uint32_t readGPIO() {
+  // This backend is limited to C011F6Ux: D0..8 = PA0..8, D9/10 = PA11/12,
+  // D15 = PC14. Snapshot each input register once instead of calling
+  // digitalRead() for every pin while the I2C interrupt is waiting.
+  uint32_t portA = GPIOA->IDR;
+  uint32_t portC = GPIOC->IDR;
+  uint32_t value = (portA & 0x01FFUL) | ((portA >> 2) & 0x0600UL) |
+                   ((portC << 1) & 0x8000UL);
+  return value & validGPIO();
 }
 
 void applyGPIO(uint32_t pins) {
@@ -254,16 +279,117 @@ void applyGPIO(uint32_t pins) {
 #include "Adafruit_seesawPeripheral_stm32_spi.h"
 #endif
 
+#if CONFIG_UART
+uint8_t firstUARTStatus() { return CONFIG_UART_SERCOM.available() ? 2 : 0; }
+uint8_t firstUARTData() { return CONFIG_UART_SERCOM.peek(); }
+#endif
+
+/*! Select only the first-byte SOURCE, not a cached register value. The read
+ * callback still takes the live snapshot and performs all read-to-clear work.
+ * C011 is little-endian: the high byte of a live 16/32-bit value is at +1/+3.
+ */
+void prepareFirstByte() {
+  static const uint8_t zero = 0, unavailable = 0xFF, hardwareID = SEESAW_HW_ID;
+  static const uint8_t versionHigh = (uint32_t)PRODUCT_CODE >> 8;
+  seesawWire.setFirstByte(&zero);
+  if (selectedBase == SEESAW_STATUS_BASE) {
+    if (selectedRegister == SEESAW_STATUS_HW_ID)
+      seesawWire.setFirstByte(&hardwareID);
+    else if (selectedRegister == SEESAW_STATUS_VERSION)
+      seesawWire.setFirstByte(&versionHigh);
+    // All supported OPTIONS and GPIO bits are below bit 24.
+  }
+#if CONFIG_ADC
+  else if (selectedBase == SEESAW_ADC_BASE) {
+    if (selectedRegister >= SEESAW_ADC_CHANNEL_OFFSET)
+      seesawWire.setFirstByte((const volatile uint8_t *)&g_bufferedADCRead + 1);
+    else if (selectedRegister == SEESAW_ADC_STATUS)
+      seesawWire.setFirstByte(&g_adcStatus);
+  }
+#endif
+#if CONFIG_PWM || CONFIG_PWM_16BIT
+  else if (selectedBase == SEESAW_TIMER_BASE)
+    seesawWire.setFirstByte(&g_pwmStatus);
+#endif
+#if CONFIG_EEPROM
+  else if (selectedBase == SEESAW_EEPROM_BASE) {
+    if (eepromSafe)
+      seesawWire.setFirstByte((const uint8_t *)eepromAddress +
+                              selectedRegister);
+    else
+      seesawWire.setFirstByte(&unavailable);
+  }
+#endif
+#if CONFIG_NEOPIXEL
+  else if (selectedBase == SEESAW_NEOPIXEL_BASE)
+    seesawWire.setFirstByte(&g_neopixel_status);
+#endif
+#if CONFIG_ENCODER
+  else if (selectedBase == SEESAW_ENCODER_BASE) {
+    uint8_t encoder = selectedRegister & 0x0F;
+    uint8_t command = selectedRegister & 0xF0;
+    if (encoder < CONFIG_NUM_ENCODERS) {
+      if (command == SEESAW_ENCODER_POSITION)
+        seesawWire.setFirstByte(
+            (const volatile uint8_t *)&g_enc_value[encoder] + 3);
+      else if (command == SEESAW_ENCODER_DELTA)
+        seesawWire.setFirstByte(
+            (const volatile uint8_t *)&g_enc_delta[encoder] + 3);
+    }
+  }
+#endif
+#if CONFIG_UART
+  else if (selectedBase == SEESAW_SERCOM0_BASE) {
+    if (selectedRegister == SEESAW_SERCOM_STATUS)
+      seesawWire.setFirstByte(firstUARTStatus);
+    else if (selectedRegister == SEESAW_SERCOM_INTEN)
+      seesawWire.setFirstByte(&g_uart_inten);
+    else if (selectedRegister == SEESAW_SERCOM_BAUD)
+      seesawWire.setFirstByte((const volatile uint8_t *)&g_uart_baud + 3);
+    else if (selectedRegister == SEESAW_SERCOM_DATA)
+      seesawWire.setFirstByte(firstUARTData);
+  }
+#endif
+#if CONFIG_SPI
+  else if (selectedBase == spiBase) {
+    if (selectedRegister == spiStatusRegister)
+      seesawWire.setFirstByte(spiStatusFlags);
+    else if (selectedRegister == spiReadRegister)
+      seesawWire.setFirstByte(spiFirstReceiveByte);
+    else if (selectedRegister == spiConfigRegister)
+      seesawWire.setFirstByte(&spiMode);
+    else if (selectedRegister == spiClockRegister)
+      seesawWire.setFirstByte(spiFirstClockByte);
+  }
+#endif
+}
+
+/*! Decode the register pointer before a possible immediate repeated START. */
+bool receiveHeader(uint8_t base, uint8_t reg) {
+  selectedBase = base;
+  selectedRegister = reg;
+  prepareFirstByte();
+  // A full queue can invalidate the pointer in receive(). In that case finish
+  // reception before loading the first reply byte, even on a repeated START.
+  // Between this header and START, the main loop can only free queue entries.
+#if CONFIG_SPI
+  if (base == spiBase)
+    return true; // Two-byte SPI queries bypass the command queue.
+#endif
+  return (head + 1) % queueSize != tail;
+}
+
 void receive(int length) {
 #if CONFIG_SPI
   // Status/RX reads must remain available when the work queue is full.
   if (length >= 2) {
-    uint8_t base = Wire.peek();
+    uint8_t base = seesawWire.peek();
     if (base == spiBase && length == 2) {
-      Wire.read();
-      uint8_t reg = Wire.read();
+      seesawWire.read();
+      uint8_t reg = seesawWire.read();
       selectedBase = base;
       selectedRegister = reg;
+      prepareFirstByte();
       if (reg == spiStatusRegister || reg == spiReadRegister ||
           reg == spiConfigRegister || reg == spiClockRegister)
         return;
@@ -278,23 +404,25 @@ void receive(int length) {
   if (length < 2 || length > commandSize || next == tail) {
 #if CONFIG_SPI
     if (spiConfigured || spiPending ||
-        (length >= 2 && Wire.peek() == spiBase)) {
+        (length >= 2 && seesawWire.peek() == spiBase)) {
       spiError = spiQueueOverflow;
       spiAbortPending = true;
     }
 #endif
     selectedBase = selectedRegister = 0xFF;
-    while (Wire.available()) {
-      Wire.read();
+    prepareFirstByte();
+    while (seesawWire.available()) {
+      seesawWire.read();
     }
     return;
   }
   commands[head].length = length;
   for (uint8_t i = 0; i < length; i++) {
-    commands[head].data[i] = Wire.read();
+    commands[head].data[i] = seesawWire.read();
   }
   selectedBase = commands[head].data[0];
   selectedRegister = commands[head].data[1];
+  prepareFirstByte();
 #if CONFIG_SPI
   if (selectedBase == spiBase)
     spiPending++;
@@ -421,6 +549,9 @@ void reset() {
   // Enable a weak pull-up without changing the open-drain output mode.
   PinName irqPin = digitalPinToPinName(CONFIG_INTERRUPT_PIN);
   pin_function(irqPin, STM_PIN_DATA(STM_MODE_OUTPUT_OD, LL_GPIO_PULL_UP, 0));
+  irqPort = get_GPIO_Port(STM_PORT(irqPin));
+  irqPinMask = 1UL << STM_PIN(irqPin);
+  irqActive = false;
 #endif
   lastGPIO = readGPIO();
 }
@@ -487,6 +618,13 @@ void Adafruit_seesawPeripheral_gpioWrite(uint32_t mask, bool high) {
     output |= mask;
   else
     output &= ~mask;
+  applyGPIO(mask);
+}
+/*! Apply a complete GPIO value with one hardware pass. */
+void Adafruit_seesawPeripheral_gpioBulk(uint32_t value) {
+  using namespace SeesawSTM32;
+  uint32_t mask = validGPIO();
+  output = (output & ~mask) | (value & mask);
   applyGPIO(mask);
 }
 void Adafruit_seesawPeripheral_gpioToggle(uint32_t mask) {
@@ -558,12 +696,12 @@ void Adafruit_seesawPeripheral_reset(void) {
   reset();
   uint8_t newAddress = configuredAddress();
   if (newAddress != address) {
-    Wire.end();
+    seesawWire.end();
     address = newAddress;
-    Wire.begin((int)address);
-    // STM32duino clears callbacks in begin(); always reattach afterward.
-    Wire.onReceive(receiveEvent);
-    Wire.onRequest(requestEvent);
+    seesawWire.begin((int)address);
+    // Reattach the common handlers after changing the target address.
+    seesawWire.onReceive(receiveEvent);
+    seesawWire.onRequest(requestEvent);
   }
 }
 
@@ -582,14 +720,15 @@ bool Adafruit_seesawPeripheral_begin() {
 #if CONFIG_PWM
   analogWriteResolution(16);
 #endif
-  Wire.setSDA(CONFIG_I2C_SDA_PIN);
-  Wire.setSCL(CONFIG_I2C_SCL_PIN);
+  seesawWire.setSDA(CONFIG_I2C_SDA_PIN);
+  seesawWire.setSCL(CONFIG_I2C_SCL_PIN);
   address = configuredAddress();
-  Wire.begin((int)address);
-  // STM32duino begin() clears the request callback: attach after
-  // initialization.
-  Wire.onReceive(receiveEvent);
-  Wire.onRequest(requestEvent);
+  // This transport retains callbacks in begin(); install them before IRQs run.
+  seesawWire.onHeader(receiveHeader);
+  seesawWire.onReceive(receiveEvent);
+  seesawWire.onRequest(requestEvent);
+  if (!seesawWire.begin(address))
+    return false;
   return true;
 }
 
@@ -617,20 +756,26 @@ void Adafruit_seesawPeripheral_run() {
     Adafruit_seesawPeripheral_processCommand(command.data, command.length);
   }
 #if defined(CONFIG_INTERRUPT_PIN) || CONFIG_ENCODER
-  // Snapshot and flag updates must not race the read-to-clear Wire callback.
-  noInterrupts();
   uint32_t current = readGPIO();
 #if CONFIG_ENCODER
   for (uint8_t i = 0; i < CONFIG_NUM_ENCODERS; i++) {
-    uint8_t phase = 3 ^ (digitalRead(encoderPins[i][0]) |
-                         (digitalRead(encoderPins[i][1]) << 1));
+    // Encoder pins are exposed GPIOs, sampled in the same port snapshot.
+    uint8_t phase = 3 ^ (((current >> encoderPins[i][0]) & 1U) |
+                         (((current >> encoderPins[i][1]) & 1U) << 1));
     Adafruit_seesawPeripheral_updateEncoder(i, phase);
   }
 #endif
-  g_irqFlags |= (current ^ lastGPIO) & g_irqGPIO;
+  // Keep only the read-to-clear flag publication atomic. Sampling and
+  // quadrature decoding must not hold off an incoming I2C address.
+  uint32_t changed = (current ^ lastGPIO) & g_irqGPIO;
   lastGPIO = current;
+  if (changed) {
+    uint32_t savedMask = __get_PRIMASK();
+    __disable_irq();
+    g_irqFlags |= changed;
+    __set_PRIMASK(savedMask);
+  }
   updateIRQ();
-  interrupts();
 #endif
 }
 #endif
